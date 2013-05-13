@@ -1,0 +1,365 @@
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+////               ...::: ROBO RESCUE PROGAM ver. 1.2 :::...               ////
+//// By: Team Ripper                                                       ////
+//// Date: 19 April 2013                                                   ////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+//// Version: 1.0                                                          ////
+//// Date: 19/04/2013                                                      ////
+//// Changelog:                                                            ////
+//// * Initial Version                                                     ////
+///////////////////////////////////////////////////////////////////////////////
+//// Version: 1.1                                                          ////
+//// Date: 04/05/2013                                                      ////
+//// Changelog:                                                            ////
+//// * Implemented a new line search algorithim                            ////
+//// * Introduced intersection negotiation coding                          ////
+///////////////////////////////////////////////////////////////////////////////
+//// Version: 1.15                                                         ////
+//// Date: 06/05/2013                                                      ////
+//// Changelog:                                                            ////
+//// * Claw task added                                                     ////
+///////////////////////////////////////////////////////////////////////////////
+//// Version: 1.2                                                          ////
+//// Date: 09/05/2013                                                      ////
+//// Changelog:                                                            ////
+//// * Refined code formatting                                             ////
+//// * Refined line detection to be more efficient                         ////
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+
+#include "NXCDefs.h"
+
+#define ZERO    0
+#define BASIC_TURN_TIME   100
+#define MOVE_TIME   100
+#define PAUSE_TIME  100
+
+#define MAX_POWER   100
+#define HIGH_POWER  75
+#define MED_POWER   50
+#define LOW_POWER   25
+#define SCAN_SPEED  10
+
+#define ALREADY_FOUND   66
+#define DOES_NOT_EXIST  99
+
+//Used for intersection detection
+#define FIRST_MARKER   1
+#define SECOND_MARKER  2
+#define THIRD_MARKER   3
+
+//Turn times for the various pre-defined speeds
+//time taken to do a ~170 degree on the spot turn
+//#define MAX_TURN_TIME
+//#define HIGH_TURN_TIME
+#define MED_TURN_TIME   300
+#define LOW_TURN_TIME   700
+
+//Time taken to do a ~22.5 degree on the spot turn
+#define MAX_QUICK_TURN_TIME     90
+#define HIGH_QUICK_TURN_TIME    125
+#define MED_QUICK_TURN_TIME     225
+#define LOW_QUICK_TURN_TIME     570
+
+//max loop search count for ~22.5 degree intervals
+#define MAX_SEARCH_COUNT 9
+
+//Light sensor threshold values
+//RAW values with led light on
+#define LIGHT_THRESHOLD_BLACK 450
+#define LIGHT_THRESHOLD_GREY  580
+#define LIGHT_THRESHOLD_BACKGROUND 590
+
+//intersection 2D array parameters
+#define ROWS        10
+#define COLS        11
+
+//intersection 2d array row and col. identifiers
+//rows
+#define INTERSECT_ID_1  0
+#define INTERSECT_ID_2  1
+#define INTERSECT_ID_3  2
+#define INTERSECT_ID_4  3
+#define INTERSECT_ID_5  4
+#define INTERSECT_ID_6  5
+#define INTERSECT_ID_7  6
+#define INTERSECT_ID_8  7
+
+//coloums
+#define INTERSECT_MARK_1    0
+#define INTERSECT_MARK_2    1
+#define INTERSECT_MARK_3    2
+
+#define INTERSECT_TYPE  3
+
+#define INTERSECT_LEFT  4
+#define INTERSECT_STRT  5
+#define INTERSECT_RGHT  6
+
+//modes
+#define EXPLORATORY 0
+#define BACK_TRACK 1
+
+//For claw task
+#define CLAW_MOTOR  OUT_A
+#define CLAW_SPEED  70
+#define CLAW_CLOSE_TIME     500
+#define CLOSED  0
+#define OPEN    1
+
+//Macros
+#define right_turn(speed, time) OnFwd(OUT_B, speed);\
+                                OnRev(OUT_C, speed);Wait(time);
+#define left_turn(speed, time) OnFwd(OUT_C, speed);\
+                               OnRev(OUT_B, speed);Wait(time);
+#define fwd_move(speed, time) OnFwd(OUT_BC, speed);Wait(time);
+#define rev_move(speed, time) OnRev(OUT_BC, speed);Wait(time);
+#define stop_move(time) OnFwd(OUT_BC, ZERO);Wait(time)
+
+//Use following to configure sensor inputs/ids for whole code
+//#define l_touch_sensor IN_3
+//#define l_touch_sensor_id SENSOR_3
+#define touch_sensor IN_1
+#define touch_sensor_id SENSOR_1
+#define light_sensor IN_4
+#define light_sensor_id SENSOR_4
+//#define ultrasonic_sensor IN_4
+//#define ultrasonic_sensor_id SENSOR_4
+
+
+//Function prototypes
+int intersect_check( int travelTime1, int travelTime2, int travelTime3);
+
+char intersect_marker_check(int travelTime);
+
+int intersect_checker(char &intersections[][]);
+
+
+//GLOBAL Variables
+
+char intersections[ROWS][COLS];
+
+int mode = EXPLORATORY;
+int travelTime1 = ZERO;
+int travelTime2 = ZERO;
+int travelTime3 = ZERO;
+int travelTime0 = ZERO;
+int intersectionMarker = ZERO;
+int intersectionNegotiation = FALSE;
+int deadEnd = FALSE;
+int prevIntersectID = DOES_NOT_EXIST;
+int nextIntersect_ID = DOES_NOT_EXIST;
+int nnn = 1;
+
+char detectedMarker1;
+char detectedMarker2;
+char detectedMarker3;
+
+mutex moveMutex;
+
+//Subroutine used to do ~180 degree turn
+sub about_turn(int speed, int time) {
+    if(Random() >= 0)   {
+        right_turn(speed, time);
+    } else {
+        left_turn(speed, time);
+    }
+}
+
+
+//Task used to detect and follow lines, should be default task
+task line_follow()   {
+    SetSensorType(light_sensor, SENSOR_TYPE_LIGHT_ACTIVE);
+    SetSensorMode(light_sensor, SENSOR_MODE_RAW);
+    while(true) {
+
+        TextOut(15, LCD_LINE1, "Raw Light Sensor Readings");
+        NumOut(15, LCD_LINE2, light_sensor_id);
+        TextOut(15, LCD_LINE4, "travelTimes 1/2/3");
+        NumOut (15, LCD_LINE5, travelTime1);
+        NumOut (15, LCD_LINE6, travelTime2);
+        NumOut (15, LCD_LINE7, travelTime3);
+        ///NumOut (15, LCD_LINE8, nnn);
+
+        if(light_sensor_id <= LIGHT_THRESHOLD_GREY && light_sensor_id > LIGHT_THRESHOLD_BLACK) {
+            //Used to move forward when on path
+            Acquire(moveMutex);
+            fwd_move(MED_POWER, MOVE_TIME);
+            Release(moveMutex);
+        } else if(light_sensor_id <= LIGHT_THRESHOLD_BLACK) {
+            //This part used to identify intersection markers
+            Acquire(moveMutex);
+            //used in identifying intersection markers
+            if(travelTime1 == ZERO) {
+                travelTime1 = CurrentTick()
+                intersectionMarker = FIRST_MARKER;
+            } else if(travelTime2 == ZERO) {
+                travelTime2 = CurrentTick()
+                intersectionMarker = SECOND_MARKER;
+            } else if(travelTime3 == ZERO) {
+                travelTime3 = CurrentTick()
+                intersectionMarker = THIRD_MARKER;
+            } else {
+                //Do Nothing
+            }
+
+            while(light_sensor_id <= LIGHT_THRESHOLD_BLACK) {
+                NumOut(15, LCD_LINE2, light_sensor_id);
+                TextOut(15, LCD_LINE1, "Raw Light Sensor Readings");
+                fwd_move(MED_POWER, MOVE_TIME);
+
+                //PlaySound(SOUND_DOUBLE_BEEP);
+                //PlayToneEx("frequency", "duration", "volume", "loop?");
+                //PlayTones("tones");
+            }
+
+
+            //used in identifying intersection markers
+            if(intersectionMarker == FIRST_MARKER) {
+                travelTime1 = CurrentTick() - travelTime1;
+            } else if(intersectionMarker == SECOND_MARKER) {
+                travelTime2 = CurrentTick() - travelTime2;
+            } else if(intersectionMarker = THIRD_MARKER) {
+                travelTime3 = CurrentTick() - travelTime3;
+                intersectionNegotiation = TRUE;
+            } else {
+                //Do nothing
+            }
+
+            //Need to implement a failsafe in the event of a 'failed' intersection detection and reset variables for another try,
+            //possible use of timers to trigger reset event.
+
+            //Code below used to travel through intersections
+            if(intersectionNegotiation == TRUE) {
+
+                nextIntersect_ID = intersect_check(travelTime1, travelTime2, travelTime3);
+
+                detectedMarker1 = intersect_marker_check(travelTime1);
+                detectedMarker2 = intersect_marker_check(travelTime2);
+                detectedMarker3 = intersect_marker_check(travelTime3);
+
+                for(int iii = 1; iii <= ROWS; iii++) {
+                //check array for existing  mathces
+
+                }
+
+                //look through array for a match?
+
+                //use a function here to id, record and check intersection
+                //use a function to store the 'previous' intersection and
+                //check if it is a 'loop' path and backtrack if true.
+
+
+                //Use a check to see if current intersection has been stored and reset intersection markers
+
+
+                //Resetting intersection variables for next use
+                intersectionNegotiation = FALSE;
+                travelTime1 = ZERO;
+                travelTime2 = ZERO;
+                travelTime3 = ZERO;
+            }
+
+            Release(moveMutex);
+
+        } else if(light_sensor_id >= LIGHT_THRESHOLD_BACKGROUND /*&& intersectionNegotiation == FALSE*/) {
+            //this part used to search and follow curved/angled pathways
+            travelTime0 = CurrentTick();
+            int currentTime = 0;
+
+            while(light_sensor_id > LIGHT_THRESHOLD_GREY && nnn <= MAX_SEARCH_COUNT) {
+                currentTime = CurrentTick() - travelTime0;
+                if(nnn == (MAX_SEARCH_COUNT - 1)) {
+                    while(light_sensor_id > LIGHT_THRESHOLD_GREY && currentTime <= (nnn * nnn - 1) * MED_QUICK_TURN_TIME) {
+                        NumOut(15, LCD_LINE2, light_sensor_id);
+                        Acquire(moveMutex);
+                        left_turn(MED_POWER, BASIC_TURN_TIME);
+                        Release(moveMutex);
+                        currentTime = CurrentTick() - travelTime0;
+                    }
+                } else if(nnn == MAX_SEARCH_COUNT) {
+                    while(light_sensor_id > LIGHT_THRESHOLD_GREY) {
+                        NumOut(15, LCD_LINE2, light_sensor_id);
+                        Acquire(moveMutex);
+                        left_turn(MED_POWER, BASIC_TURN_TIME);
+                        Release(moveMutex);
+                        currentTime = CurrentTick() - travelTime0;
+                        deadEnd = TRUE;
+                    }
+                } else if(nnn % 2 == ZERO) {
+                    while(light_sensor_id > LIGHT_THRESHOLD_GREY && currentTime <= nnn * nnn * MED_QUICK_TURN_TIME) {
+                        NumOut(15, LCD_LINE2, light_sensor_id);
+                        Acquire(moveMutex);
+                        left_turn(MED_POWER, BASIC_TURN_TIME);
+                        Release(moveMutex);
+                        currentTime = CurrentTick() - travelTime0;
+                    }
+                } else if(light_sensor_id > LIGHT_THRESHOLD_GREY) {
+                    //remaining odd numbers should go here
+                    while(light_sensor_id > LIGHT_THRESHOLD_GREY && currentTime <= nnn * nnn * MED_QUICK_TURN_TIME) {
+                        NumOut(15, LCD_LINE2, light_sensor_id);
+                        Acquire(moveMutex);
+                        right_turn(MED_POWER, BASIC_TURN_TIME);
+                        Release(moveMutex);
+                        currentTime = CurrentTick() - travelTime0;
+                    }
+                } else {
+                    //Shoud never get here . . .
+                }
+            nnn++;
+            }
+        nnn = 1;
+
+        //function to identify and record dead ends
+        //If dead end = true, change current path
+
+        } else {
+            //Do nothing, should never get here =0 >W< ^.^
+        }
+
+    }
+}
+
+//Task used to control claw activation
+task claw() {
+
+    int clawStatus = OPEN;
+    SetSensor(touch_sensor, SENSOR_TOUCH);
+    while (true) {
+        if (touch_sensor_id == 1 && clawStatus == OPEN) {
+            Acquire(moveMutex);
+            PlaySound(SOUND_DOUBLE_BEEP);
+            stop_move(PAUSE_TIME);
+            OnRev(CLAW_MOTOR, CLAW_SPEED);
+            Wait(CLAW_CLOSE_TIME);
+            Off(CLAW_MOTOR);
+            clawStatus = CLOSED;
+            Release(moveMutex);
+        }
+    }
+
+}
+
+task main() {
+    Precedes(line_follow, claw);
+}
+
+//Functions
+
+int intersect_check( int travelTime1, int travelTime2, int travelTime3) {
+
+    return 0;
+}
+
+
+
+char intersect_marker_check(int travelTime) {
+
+    if(travelTime < 500 ) {
+        return 'S';
+    } else {
+        return 'L';
+    }
+}
